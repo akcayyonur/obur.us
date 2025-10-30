@@ -93,6 +93,6 @@ fastify.get('/recommendations', async (req, reply) => {
   }
 });
 
-// DIKKAT: 0.0.0.0'a dinle
+
 fastify.listen({ host: '0.0.0.0', port: 3000 })
   .catch(err => { fastify.log.error(err); process.exit(1); });
