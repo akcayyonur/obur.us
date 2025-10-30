@@ -1,0 +1,53 @@
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    container_name: oburus-postgres
+    environment:
+      - POSTGRES_USER=oburus
+      - POSTGRES_PASSWORD=oburus_pass
+      - POSTGRES_DB=oburus
+    ports:
+      - "5432:5432"
+    volumes:
+      # Kalıcı veri
+      - pg_data:/var/lib/postgresql/data
+      # İlk açılışta init.sql otomatik çalışsın
+      - ../infra/db:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U oburus -d oburus"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
+
+  api:
+    build: ../apps/api
+    environment:
+      # pg bağlantı bilgileri (API'de pg kullanacaksın)
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_NAME: oburus
+      DB_USER: oburus
+      DB_PASS: oburus_pass
+
+      RECO_URL: http://recommender:8000
+      NODE_ENV: development
+    depends_on:
+      db:
+        condition: service_healthy
+      recommender:
+        condition: service_started
+    ports:
+      - "3000:3000"
+    volumes:
+      - ../apps/api:/app
+
+  recommender:
+    build: ../apps/recommender
+    ports:
+      - "8000:8000"
+    volumes:
+      - ../apps/recommender:/app
+
+volumes:
+  pg_data:
