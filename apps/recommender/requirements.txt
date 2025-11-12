@@ -4,4 +4,8 @@ numpy
 pydantic
 pandas
 openpyxl
-cls
+
+# test
+pytest
+httpx
+pytest-cov

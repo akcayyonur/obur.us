@@ -1,0 +1,12 @@
+.....                                                                    [100%]
+================================ tests coverage ================================
+_______________ coverage: platform linux, python 3.11.14-final-0 _______________
+
+Name                        Stmts   Miss  Cover   Missing
+---------------------------------------------------------
+main.py                       255    255     0%   2-485
+tests/test_recommender.py      56      0   100%
+---------------------------------------------------------
+TOTAL                         311    255    18%
+Coverage XML written to file /app/artifacts/coverage.xml
+5 passed in 1.10s
