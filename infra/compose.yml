@@ -9,9 +9,7 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      # Kalıcı veri
       - pg_data:/var/lib/postgresql/data
-      # İlk açılışta init.sql otomatik çalışsın
       - ../infra/db:/docker-entrypoint-initdb.d
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U oburus -d oburus"]
@@ -20,16 +18,27 @@ services:
       retries: 10
       start_period: 20s
 
+  neo4j:
+    image: neo4j:5.20
+    container_name: oburus-neo4j
+    environment:
+      - NEO4J_AUTH=neo4j/oburus_pass
+      - NEO4J_PLUGINS=["apoc"]
+    ports:
+      - "7474:7474"   # Neo4j Browser
+      - "7687:7687"   # Bolt
+    volumes:
+      - neo4j_data:/data
+
   api:
     build: ../apps/api
+    container_name: oburus-api
     environment:
-      # pg bağlantı bilgileri (API'de pg kullanacaksın)
       DB_HOST: db
       DB_PORT: "5432"
       DB_NAME: oburus
       DB_USER: oburus
       DB_PASS: oburus_pass
-
       RECO_URL: http://recommender:8000
       NODE_ENV: development
     depends_on:
@@ -44,10 +53,16 @@ services:
 
   recommender:
     build: ../apps/recommender
+    container_name: oburus-recommender
     ports:
       - "8000:8000"
     volumes:
       - ../apps/recommender:/app
+    environment:
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASS: oburus_pass
 
 volumes:
   pg_data:
+  neo4j_data:

@@ -4,6 +4,7 @@ numpy
 pydantic
 pandas
 openpyxl
+neo4j>=5.14
 
 # test
 pytest
