@@ -84,6 +84,9 @@ def get_candidates(
         r.name          AS name,
         r.rating_avg    AS rating_avg,
         r.rating_count  AS rating_count,
+        r.price_range   AS price_range,
+        r.pagerank      AS pagerank,
+        r.reviews_text  AS reviews_text,
         l.lat           AS lat,
         l.lng           AS lng,
         collect(c.name) AS categories
@@ -120,6 +123,8 @@ def get_candidates(
                 "categories": ",".join(cats),
                 "rating_avg": row["rating_avg"],
                 "rating_count": row["rating_count"],
+                "price_range": row["price_range"],
+                "pagerank": row["pagerank"],
                 "km": km
             })
 

@@ -27,10 +27,10 @@
 <h2>🍽️ OBURUS – Personalized Restaurant Recommender</h2>
 
 <label>Latitude</label>
-<input id="lat" placeholder="41.04">
+<input id="lat" value="41.04">
 
 <label>Longitude</label>
-<input id="lng" placeholder="29.02">
+<input id="lng" value="29.02">
 
 <label>Ne istiyorsun? (örn: coffee,dessert)</label>
 <input id="prefs" placeholder="coffee,dessert">
@@ -38,40 +38,102 @@
 <label>Yarıçap (km)</label>
 <input id="radius" value="5">
 
-<button onclick="search()">Önerileri Getir</button>
+<label for="user-select">Bir Kullanıcı Seç</label>
+<select id="user-select" style="width: 100%; padding: 8px; margin: 6px 0;"></select>
+
+<button onclick="fetchRecommendations()">Önerileri Getir</button>
 
 <hr>
+
 
 <div id="results"></div>
 
 <script>
-async function search() {
-  const lat = document.getElementById("lat").value;
-  const lng = document.getElementById("lng").value;
-  const prefs = document.getElementById("prefs").value;
-  const radius = document.getElementById("radius").value;
+  // --- Reusable Result Renderer ---
+  function renderResults(data, container) {
+    container.innerHTML = ""; // Clear previous results
 
-  const url = `/rank?lat=${lat}&lng=${lng}&prefs=${prefs}&radius_km=${radius}`;
+    if (!data.items || data.items.length === 0) {
+      container.innerHTML = "<p>Sonuç bulunamadı.</p>";
+      return;
+    }
 
-  const res = await fetch(url);
-  const data = await res.json();
+    data.items.forEach(item => {
+      const div = document.createElement("div");
+      div.className = "card";
+      const matchedText = item.matched_categories && item.matched_categories.length > 0
+        ? `❤️ Matched: ${item.matched_categories.join(", ")}`
+        : '';
 
-  const container = document.getElementById("results");
-  container.innerHTML = "";
+      div.innerHTML = `
+        <strong>${item.name}</strong><br>
+        ⭐ Score: ${item.score}<br>
+        📍 ${item.km.toFixed(2)} km<br>
+        🍴 Categories: ${item.categories || 'N/A'}<br>
+        ${matchedText}
+      `;
+      container.appendChild(div);
+    });
+  }
 
-  data.items.forEach(item => {
-    const div = document.createElement("div");
-    div.className = "card";
-    div.innerHTML = `
-      <strong>${item.name}</strong><br>
-      ⭐ Score: ${item.score}<br>
-      📍 ${item.km.toFixed(2)} km<br>
-      🍴 Categories: ${item.categories}<br>
-      ❤️ Matched: ${item.matched_prefs.join(", ")}
-    `;
-    container.appendChild(div);
-  });
-}
+  // --- Unified Recommendation Search ---
+  async function fetchRecommendations() {
+    const lat = document.getElementById("lat").value;
+    const lng = document.getElementById("lng").value;
+    const prefs = document.getElementById("prefs").value;
+    const radius = document.getElementById("radius").value;
+    const userId = document.getElementById("user-select").value; // Get selected user ID
+    const resultsContainer = document.getElementById("results");
+    resultsContainer.innerHTML = "<p>Loading recommendations...</p>";
+
+    let url;
+    if (userId) {
+      // Personalized recommendations
+      url = `/users/${userId}/recommendations?lat=${lat}&lng=${lng}&radius_km=${radius}`;
+      if (prefs) {
+        url += `&prefs=${prefs}`;
+      }
+    } else {
+      // Generic recommendations
+      url = `/rank?lat=${lat}&lng=${lng}&prefs=${prefs}&radius_km=${radius}`;
+    }
+
+    try {
+      const res = await fetch(url);
+      const data = await res.json();
+      renderResults(data, resultsContainer);
+    } catch (error) {
+      resultsContainer.innerHTML = `<p>Error: ${error.message}</p>`;
+    }
+  }
+
+  // --- Populate Users on Load ---
+  async function populateUsers() {
+    try {
+      const res = await fetch('/users');
+      const users = await res.json();
+      const select = document.getElementById('user-select');
+
+      // Add default "Select User" option
+      const defaultOption = document.createElement('option');
+      defaultOption.value = '';
+      defaultOption.textContent = 'Kullanıcı Seçin';
+      select.appendChild(defaultOption);
+
+      users.forEach(user => {
+        const option = document.createElement('option');
+        option.value = user.user_id;
+        option.textContent = user.name;
+        select.appendChild(option);
+      });
+    } catch (error) {
+      const select = document.getElementById('user-select');
+      select.innerHTML = `<option value="">Could not load users</option>`;
+      console.error("Failed to populate users:", error);
+    }
+  }
+
+  window.onload = populateUsers;
 </script>
 
 </body>
