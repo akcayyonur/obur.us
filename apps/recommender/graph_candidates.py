@@ -1,6 +1,5 @@
 from neo4j import GraphDatabase
 import os
-import math
 
 # -------------------------------------------------
 # Neo4j connection
@@ -14,21 +13,6 @@ driver = GraphDatabase.driver(
     NEO4J_URI,
     auth=(NEO4J_USER, NEO4J_PASS)
 )
-
-# -------------------------------------------------
-# Geo helpers
-# -------------------------------------------------
-
-def haversine_km(lat1, lon1, lat2, lon2):
-    R = 6371.0
-    p1, p2 = math.radians(lat1), math.radians(lat2)
-    dp = math.radians(lat2 - lat1)
-    dl = math.radians(lon2 - lon1)
-    a = (
-        math.sin(dp / 2) ** 2
-        + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
-    )
-    return R * (2 * math.atan2(math.sqrt(a), math.sqrt(1 - a)))
 
 # -------------------------------------------------
 # Category fallback (isimden çıkarım)
@@ -69,16 +53,36 @@ def get_candidates(
     lat: float,
     lng: float,
     radius_km: float = 5.0,
-    limit: int = 200
+    limit: int = 200,
+    raw_prefs: list[str] = None
 ):
     """
-    Neo4j graph üzerinden restaurant adayları üretir.
-    Category yoksa isimden fallback uygular.
+    Generates restaurant candidates via Neo4j graph.
+    Prioritizes restaurants matching 'raw_prefs' (intent) in name or reviews,
+    then sorts by distance.
     """
+
+    # Calculate distance in meters for the query
+    radius_meters = radius_km * 1000.0
+    
+    # Prepare keywords for Cypher (lowercase for case-insensitive search if needed, 
+    # though we'll handle lowercase in Cypher or Python logic. 
+    # Here we assume reviews/names in DB are mixed case, so we use toLower() in Cypher).
+    keywords = [p.lower() for p in (raw_prefs or []) if p.strip()]
 
     query = """
     MATCH (r:Restaurant)-[:LOCATED_AT]->(l:Location)
+    WITH r, l, point.distance(point({latitude: l.lat, longitude: l.lng}), point({latitude: $lat, longitude: $lng})) AS dist_meters
+    WHERE dist_meters < $radius_meters
+    
+    // Determine if this restaurant matches the user's specific intent
+    WITH r, l, dist_meters,
+         reduce(match_found = false, k IN $keywords | 
+            match_found OR toLower(r.name) CONTAINS k OR toLower(r.reviews_text) CONTAINS k
+         ) AS is_intent_match
+
     OPTIONAL MATCH (r)-[:HAS_CATEGORY]->(c:Category)
+    
     RETURN
         r.id            AS id,
         r.name          AS name,
@@ -89,31 +93,28 @@ def get_candidates(
         r.reviews_text  AS reviews_text,
         l.lat           AS lat,
         l.lng           AS lng,
-        collect(c.name) AS categories
+        dist_meters / 1000.0 AS km,
+        collect(c.name) AS categories,
+        is_intent_match
+    
+    // Sort primarily by Intent Match (true > false), then by Distance
+    ORDER BY is_intent_match DESC, km ASC
+    LIMIT $limit
     """
 
     results = []
 
     with driver.session() as session:
-        rows = session.run(query)
+        # Pass parameters safely
+        rows = session.run(query, lat=lat, lng=lng, radius_meters=radius_meters, limit=limit, keywords=keywords)
 
         for row in rows:
-            km = haversine_km(
-                lat, lng,
-                row["lat"], row["lng"]
-            )
-
-            if km > radius_km:
-                continue
-
-            # 1️⃣ Graph kategorileri
+            # 1️⃣ Graph categories
             cats = [c for c in row["categories"] if c]
 
-            # 2️⃣ Fallback: isimden kategori çıkar
+            # 2️⃣ Fallback: infer category from name
             if not cats:
                 cats = infer_categories_from_name(row["name"])
-                print("DEBUG:", row["name"], "→ cats:", cats)
-
 
             results.append({
                 "id": row["id"],
@@ -125,10 +126,10 @@ def get_candidates(
                 "rating_count": row["rating_count"],
                 "price_range": row["price_range"],
                 "pagerank": row["pagerank"],
-                "km": km
+                "reviews_text": row["reviews_text"],
+                "km": row["km"],
+                # We can optionally pass 'is_intent_match' if we want to debug, 
+                # but the Python scoring will re-evaluate strict matches anyway.
             })
 
-    # Mesafeye göre sırala
-    results.sort(key=lambda x: x["km"])
-
-    return results[:limit]
+    return results

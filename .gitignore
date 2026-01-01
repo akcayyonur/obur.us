@@ -2,5 +2,8 @@ node_modules
 dist
 __pycache__
 .env
-
+apps/recommender/data/
+debug_lexicon.py
+debug_nlp.py
+inspect_data.py
 artifacts/

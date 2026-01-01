@@ -30,7 +30,7 @@ app.mount("/ui", StaticFiles(directory="static", html=True), name="static")
 
 # Build absolute paths to data files
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-USERS_FILE_PATH = os.path.join(BASE_DIR, "data", "users.xlsx")
+USERS_FILE_PATH = os.path.join(BASE_DIR, "data", "synthetic_users.xlsx")
 
 NEO4J_URI = "bolt://neo4j:7687"
 NEO4J_USER = "neo4j"
@@ -79,6 +79,10 @@ FOOD_TO_CATEGORY = {
     "döner": "turkish",
     "lahmacun": "turkish",
     "baklava": "dessert",
+    "köfte": "turkish",
+    "kofte": "turkish",
+    "tatlı": "dessert",
+    "tatli": "dessert",
     # Italian
     "pizza": "italian",
     "pasta": "italian",
@@ -99,6 +103,10 @@ FOOD_TO_CATEGORY = {
     "hamburger": "fast-food",
     "sushi": "japanese",
     "seafood": "seafood",
+    "balık": "seafood",
+    "balik": "seafood",
+    "et": "steakhouse",
+    "meat": "steakhouse",
     "steak": "steakhouse",
 }
 
@@ -109,6 +117,7 @@ W_CAT    = 0.14
 W_DIST   = 0.10
 W_PRICE  = 0.10
 W_NAME   = 0.15  # New: Score for matching preference in name
+W_REVIEW = 0.25  # Increased from 0.20
 W_COLLAB = 0.10
 W_PAGERANK = 0.18
 W_SENTIMENT = 0.10 # New: Weight for sentiment score
@@ -166,7 +175,7 @@ def pagerank_score(pr):
     return min(1.0, math.log10(pr + 1))
 
 
-def score_item(item: dict, base_prefs: Set[str], expanded_prefs: Set[str], price_pref: int | None, collab_score: float, pagerank: float, sentiment_score: float):
+def score_item(item: dict, base_prefs: Set[str], expanded_prefs: Set[str], raw_prefs: Set[str], price_pref: int | None, collab_score: float, pagerank: float, sentiment_score: float):
     tokens = {t.strip().lower() for t in item.get("categories", "").split(",") if t}
     
     # Separate matches for base and expanded preferences
@@ -182,15 +191,35 @@ def score_item(item: dict, base_prefs: Set[str], expanded_prefs: Set[str], price
     # --- Name Matching ---
     name_score = 0.0
     item_name_lower = item.get("name", "").lower()
-    name_matched_prefs = {p for p in base_prefs if p in item_name_lower}
-    if name_matched_prefs:
+    
+    # Check both MAPPED prefs (e.g. "turkish") and RAW prefs (e.g. "kebap")
+    # This fixes the issue where "kebap" maps to "turkish" and we lose the specificity
+    matched_raw_name = {p for p in raw_prefs if p in item_name_lower}
+    matched_mapped_name = {p for p in base_prefs if p in item_name_lower}
+    
+    if matched_raw_name or matched_mapped_name:
         name_score = 1.0
         # Add name-matched prefs to the response if they weren't found in categories
-        for p in name_matched_prefs:
+        for p in (matched_raw_name | matched_mapped_name):
             if p not in matched:
                 matched.append(p)
-        matched.sort()
     # --- End Name Matching ---
+
+    # --- Review Text Matching ---
+    review_score = 0.0
+    reviews_text_lower = item.get("reviews_text", "").lower() if item.get("reviews_text") else ""
+    
+    matched_reviews = {p for p in raw_prefs if p in reviews_text_lower}
+    
+    if matched_reviews:
+        review_score = 1.0
+        # Add review-matched prefs to matched list for UI feedback
+        for p in matched_reviews:
+            if p not in matched:
+                matched.append(p)
+    
+    matched.sort()
+    # --- End Review Text Matching ---
 
     # Calculate scores
     base_score = (len(matched_base) / len(base_prefs)) if base_prefs else 0.0
@@ -202,6 +231,7 @@ def score_item(item: dict, base_prefs: Set[str], expanded_prefs: Set[str], price
     d = safe_float(dist_score(item.get("km", MAX_KM)))
     pr_score = safe_float(price_score(item.get("price_range"), price_pref)) # Renamed to avoid conflict
     n_score = safe_float(name_score)
+    rv_score = safe_float(review_score)
     cs = safe_float(collab_score)
     prs = safe_float(pagerank_score(pagerank))
     
@@ -215,6 +245,7 @@ def score_item(item: dict, base_prefs: Set[str], expanded_prefs: Set[str], price
         W_DIST   * d +
         W_PRICE  * pr_score + 
         W_NAME   * n_score +
+        W_REVIEW * rv_score +
         W_COLLAB * cs +
         W_PAGERANK * prs +
         W_SENTIMENT * normalized_sentiment
@@ -227,6 +258,7 @@ def score_item(item: dict, base_prefs: Set[str], expanded_prefs: Set[str], price
         "weighted_distance": round(W_DIST * d, 6),
         "weighted_price": round(W_PRICE * pr_score, 6),
         "weighted_name_match": round(W_NAME * n_score, 6),
+        "weighted_review_match": round(W_REVIEW * rv_score, 6),
         "weighted_collaborative": round(W_COLLAB * cs, 6),
         "weighted_pagerank": round(W_PAGERANK * prs, 6),
         "weighted_sentiment": round(W_SENTIMENT * normalized_sentiment, 6),
@@ -358,11 +390,10 @@ def rank(
     base_prefs = {FOOD_TO_CATEGORY.get(p, p) for p in raw_prefs}
 
     # -----------------------------
-    # 2. Category co-occurrence expansion (DISABLED FOR STRICTER MATCHING)
+    # 2. Category co-occurrence expansion
     # -----------------------------
-    # co_map = get_category_cooccurrence()
-    # expanded_prefs = expand_categories(base_prefs, co_map)
-    expanded_prefs = set(base_prefs)  # Use only base_prefs for strict matching
+    co_map = get_category_cooccurrence()
+    expanded_prefs = expand_categories(base_prefs, co_map)
 
     # -----------------------------
     # 3. Get location-based candidates and pre-filter
@@ -370,7 +401,8 @@ def rank(
     all_candidates = get_candidates(
         lat=lat,
         lng=lng,
-        radius_km=radius_km
+        radius_km=radius_km,
+        raw_prefs=list(raw_prefs)
     )
 
     candidates = []
@@ -408,10 +440,11 @@ def rank(
             c,
             base_prefs,
             expanded_prefs,
-            price_range,
-            0.0,  # collab_score
+            raw_prefs,
+            None, # price_pref
+            0.0, # collab
             c.get("pagerank", 0.0),
-            sentiment_score # Pass sentiment score to score_item
+            sentiment_score
         )
 
         items.append({
@@ -467,9 +500,10 @@ def user_recommendations(
     # 2. Parse query preferences for FILTERING
     # -----------------------------
     query_prefs = set()
+    raw_prefs_set = set()
     if prefs:
-        raw_prefs = {p.strip().lower() for p in prefs.split(",") if p.strip()}
-        query_prefs = {FOOD_TO_CATEGORY.get(p, p) for p in raw_prefs}
+        raw_prefs_set = {p.strip().lower() for p in prefs.split(",") if p.strip()}
+        query_prefs = {FOOD_TO_CATEGORY.get(p, p) for p in raw_prefs_set}
 
     # -----------------------------
     # 3. Category co-occurrence expansion (for scoring)
@@ -489,7 +523,8 @@ def user_recommendations(
     all_candidates = get_candidates(
         lat=lat,
         lng=lng,
-        radius_km=radius_km
+        radius_km=radius_km,
+        raw_prefs=list(raw_prefs_set)
     )
 
     # -----------------------------
@@ -516,7 +551,16 @@ def user_recommendations(
         sentiment_label = get_sentiment_label(sentiment_score)
         # --- End sentiment analysis ---
 
-        score, matched, _, score_breakdown = score_item(c, base_prefs, expanded_prefs, price_range, collab_score, c.get("pagerank", 0.0), sentiment_score)
+        score, matched, _, score_breakdown = score_item(
+            c,
+            base_prefs,
+            expanded_prefs,
+            raw_prefs_set,
+            price_range,
+            collab_score,
+            c.get("pagerank", 0.0),
+            sentiment_score # Pass sentiment score to score_item
+        )
 
         items.append({
             "id": c["id"],

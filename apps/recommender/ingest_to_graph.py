@@ -12,8 +12,9 @@ NEO4J_PASS = os.getenv("NEO4J_PASS", "oburus_pass")
 driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASS))
 
 XLSX_RESTAURANTS_PATH = "/app/data/restaurants.xlsx"
-XLSX_USERS_PATH = "/app/data/users.xlsx"
-XLSX_VISITS_PATH = "/app/data/visits.xlsx"
+# Using synthetic data for better graph recommendations
+XLSX_USERS_PATH = "/app/data/synthetic_users.xlsx"
+XLSX_VISITS_PATH = "/app/data/synthetic_visits.xlsx"
 
 # -------------------------------------------------
 # TripAdvisor cuisine → OBURUS category ontology
@@ -48,6 +49,14 @@ def map_cuisines_to_categories(cuisines):
 # -------------------------------------------------
 # Neo4j ingestion (TEK QUERY, TEK MERGE)
 # -------------------------------------------------
+def create_constraints(tx):
+    # Unique constraint for Restaurant ID
+    tx.run("CREATE CONSTRAINT IF NOT EXISTS FOR (r:Restaurant) REQUIRE r.id IS UNIQUE")
+    # Unique constraint for User ID
+    tx.run("CREATE CONSTRAINT IF NOT EXISTS FOR (u:User) REQUIRE u.id IS UNIQUE")
+    # Index for Location coordinates (composite index)
+    tx.run("CREATE INDEX IF NOT EXISTS FOR (l:Location) ON (l.lat, l.lng)")
+
 def ingest_restaurants(tx, payload):
     tx.run(
         """
@@ -137,6 +146,11 @@ def calculate_fastrp_embeddings(tx):
 # Main
 # -------------------------------------------------
 def main():
+    # Create constraints and indexes
+    with driver.session() as session:
+        session.execute_write(create_constraints)
+    print("✅ Constraints & Indexes oluşturuldu.")
+
     # Ingest Restaurants
     df_restaurants = pd.read_excel(XLSX_RESTAURANTS_PATH)
 

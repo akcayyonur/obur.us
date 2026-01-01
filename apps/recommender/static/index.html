@@ -122,10 +122,15 @@
 
       users.forEach(user => {
         const option = document.createElement('option');
-        option.value = user.user_id;
+        option.value = user.user_id; 
         option.textContent = user.name;
         select.appendChild(option);
       });
+
+      // Auto-select the first real user if available
+      if (users.length > 0) {
+        select.value = users[0].user_id;
+      }
     } catch (error) {
       const select = document.getElementById('user-select');
       select.innerHTML = `<option value="">Could not load users</option>`;
