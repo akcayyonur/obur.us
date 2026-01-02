@@ -2,75 +2,204 @@
 <html lang="tr">
 <head>
   <meta charset="UTF-8">
-  <title>OBURUS – Personalized Recommender</title>
+  <title>OBURUS – Personalized Recommender (Debug)</title>
   <style>
     body {
       font-family: Arial, sans-serif;
-      max-width: 800px;
+      max-width: 1000px;
       margin: 40px auto;
+      padding: 0 20px;
     }
-    input, button {
+    input, button, select {
       padding: 8px;
       margin: 6px 0;
       width: 100%;
+      box-sizing: border-box;
+    }
+    button {
+      background-color: #4CAF50;
+      color: white;
+      border: none;
+      cursor: pointer;
+      font-size: 16px;
+    }
+    button:hover {
+      background-color: #45a049;
     }
     .card {
       border: 1px solid #ddd;
       padding: 12px;
       margin-top: 10px;
       border-radius: 6px;
+      background-color: #f9f9f9;
+    }
+    .debug-info {
+      background-color: #fff3cd;
+      border: 1px solid #ffc107;
+      padding: 10px;
+      margin: 10px 0;
+      border-radius: 4px;
+      font-family: monospace;
+      font-size: 12px;
+      max-height: 300px;
+      overflow-y: auto;
+    }
+    .error {
+      background-color: #f8d7da;
+      border: 1px solid #f5c6cb;
+      color: #721c24;
+      padding: 10px;
+      margin: 10px 0;
+      border-radius: 4px;
+    }
+    .success {
+      background-color: #d4edda;
+      border: 1px solid #c3e6cb;
+      color: #155724;
+      padding: 10px;
+      margin: 10px 0;
+      border-radius: 4px;
+    }
+    .score-breakdown {
+      font-size: 11px;
+      color: #666;
+      margin-top: 5px;
     }
   </style>
 </head>
 <body>
 
-<h2>🍽️ OBURUS – Personalized Restaurant Recommender</h2>
+<h2>🍽️ OBURUS – Personalized Restaurant Recommender (Debug Mode)</h2>
 
 <label>Latitude</label>
-<input id="lat" value="41.04">
+<input id="lat" value="41.04" type="number" step="0.0001">
 
 <label>Longitude</label>
-<input id="lng" value="29.02">
+<input id="lng" value="29.02" type="number" step="0.0001">
 
-<label>Ne istiyorsun? (örn: coffee,dessert)</label>
+<label>Ne istiyorsun? (örn: coffee,dessert,kebap) - Opsiyonel</label>
 <input id="prefs" placeholder="coffee,dessert">
 
 <label>Yarıçap (km)</label>
-<input id="radius" value="5">
+<input id="radius" value="5" type="number" step="0.1">
 
 <label for="user-select">Bir Kullanıcı Seç</label>
-<select id="user-select" style="width: 100%; padding: 8px; margin: 6px 0;"></select>
+<select id="user-select">
+  <option value="">Yükleniyor...</option>
+</select>
 
 <button onclick="fetchRecommendations()">Önerileri Getir</button>
 
 <hr>
 
-
+<div id="debug-info"></div>
 <div id="results"></div>
 
 <script>
-  // --- Reusable Result Renderer ---
+  // --- Debug Logger ---
+  function logDebug(message, data = null) {
+    const debugDiv = document.getElementById("debug-info");
+    const timestamp = new Date().toLocaleTimeString();
+    let logEntry = `[${timestamp}] ${message}`;
+    
+    if (data) {
+      logEntry += `\n${JSON.stringify(data, null, 2)}`;
+    }
+    
+    const pre = document.createElement("pre");
+    pre.className = "debug-info";
+    pre.textContent = logEntry;
+    debugDiv.appendChild(pre);
+    
+    console.log(message, data);
+  }
+
+  function showError(message) {
+    const debugDiv = document.getElementById("debug-info");
+    const errorDiv = document.createElement("div");
+    errorDiv.className = "error";
+    errorDiv.innerHTML = `<strong>Error:</strong> ${message}`;
+    debugDiv.appendChild(errorDiv);
+  }
+
+  function showSuccess(message) {
+    const debugDiv = document.getElementById("debug-info");
+    const successDiv = document.createElement("div");
+    successDiv.className = "success";
+    successDiv.innerHTML = `<strong>Success:</strong> ${message}`;
+    debugDiv.appendChild(successDiv);
+  }
+
+  // --- Result Renderer ---
   function renderResults(data, container) {
-    container.innerHTML = ""; // Clear previous results
+    container.innerHTML = "";
+
+    logDebug("Rendering results", {
+      algo: data.algo,
+      count: data.count,
+      itemsLength: data.items ? data.items.length : 0,
+      user_id: data.user_id,
+      user_historical_prefs: data.user_historical_prefs,
+      query_prefs: data.query_prefs,
+      expanded_prefs: data.expanded_prefs
+    });
 
     if (!data.items || data.items.length === 0) {
-      container.innerHTML = "<p>Sonuç bulunamadı.</p>";
+      container.innerHTML = `
+        <div class="error">
+          <p><strong>Sonuç bulunamadı.</strong></p>
+          <p>Olası nedenler:</p>
+          <ul>
+            <li>Seçilen yarıçap içinde eşleşen restoran yok</li>
+            <li>Tercihlerinizle eşleşen kategori yok</li>
+            <li>Neo4j veritabanında veri yok</li>
+            <li>Kullanıcının geçmiş tercihleri yok</li>
+          </ul>
+          <p><strong>Öneriler:</strong></p>
+          <ul>
+            <li>Yarıçapı artırın (örn: 10 km)</li>
+            <li>Tercihleri boş bırakın (tüm kategoriler)</li>
+            <li>Farklı bir kullanıcı seçin</li>
+          </ul>
+        </div>
+      `;
       return;
     }
 
-    data.items.forEach(item => {
+    showSuccess(`${data.items.length} sonuç bulundu!`);
+
+    data.items.forEach((item, index) => {
       const div = document.createElement("div");
       div.className = "card";
       const matchedText = item.matched_categories && item.matched_categories.length > 0
         ? `❤️ Matched: ${item.matched_categories.join(", ")}`
-        : '';
+        : '⚠️ No category match (general ranking)';
+
+      const sentimentEmoji = item.sentiment_label === "Positive" ? "😊" : 
+                             item.sentiment_label === "Negative" ? "😞" : "😐";
+
+      let scoreBreakdown = "";
+      if (item.score_breakdown) {
+        scoreBreakdown = `
+          <div class="score-breakdown">
+            <strong>Score Breakdown:</strong><br>
+            ${Object.entries(item.score_breakdown)
+              .map(([key, value]) => `${key}: ${value}`)
+              .join('<br>')}
+          </div>
+        `;
+      }
 
       div.innerHTML = `
-        <strong>${item.name}</strong><br>
-        ⭐ Score: ${item.score}<br>
-        📍 ${item.km.toFixed(2)} km<br>
+        <strong>#${index + 1}: ${item.name}</strong><br>
+        ⭐ Score: <strong>${item.score.toFixed(4)}</strong><br>
+        📍 ${item.km.toFixed(2)} km away<br>
         🍴 Categories: ${item.categories || 'N/A'}<br>
+        💰 Price Range: ${"$".repeat(item.price_range || 1)}<br>
+        ⭐ Rating: ${item.rating_avg ? item.rating_avg.toFixed(1) : 'N/A'} (${item.rating_count || 0} reviews)<br>
+        ${sentimentEmoji} Sentiment: ${item.sentiment_label || 'N/A'} (${item.sentiment_score ? item.sentiment_score.toFixed(2) : 'N/A'})<br>
         ${matchedText}
+        ${scoreBreakdown}
       `;
       container.appendChild(div);
     });
@@ -80,65 +209,139 @@
   async function fetchRecommendations() {
     const lat = document.getElementById("lat").value;
     const lng = document.getElementById("lng").value;
-    const prefs = document.getElementById("prefs").value;
+    const prefs = document.getElementById("prefs").value.trim();
     const radius = document.getElementById("radius").value;
-    const userId = document.getElementById("user-select").value; // Get selected user ID
+    const userId = document.getElementById("user-select").value;
     const resultsContainer = document.getElementById("results");
-    resultsContainer.innerHTML = "<p>Loading recommendations...</p>";
+    const debugContainer = document.getElementById("debug-info");
+    
+    // Clear previous results
+    resultsContainer.innerHTML = "";
+    debugContainer.innerHTML = "";
+
+    if (!lat || !lng) {
+      showError("Lütfen latitude ve longitude değerlerini girin!");
+      return;
+    }
 
     let url;
     if (userId) {
       // Personalized recommendations
       url = `/users/${userId}/recommendations?lat=${lat}&lng=${lng}&radius_km=${radius}`;
       if (prefs) {
-        url += `&prefs=${prefs}`;
+        url += `&prefs=${encodeURIComponent(prefs)}`;
       }
+      logDebug("Fetching PERSONALIZED recommendations", { userId, lat, lng, radius, prefs });
     } else {
       // Generic recommendations
-      url = `/rank?lat=${lat}&lng=${lng}&prefs=${prefs}&radius_km=${radius}`;
+      if (!prefs) {
+        showError("Kullanıcı seçmediniz. Lütfen tercih girin veya bir kullanıcı seçin!");
+        return;
+      }
+      url = `/rank?lat=${lat}&lng=${lng}&prefs=${encodeURIComponent(prefs)}&radius_km=${radius}`;
+      logDebug("Fetching GENERIC recommendations", { lat, lng, radius, prefs });
     }
 
+    logDebug("Request URL", url);
+    resultsContainer.innerHTML = "<p>⏳ Loading recommendations...</p>";
+
     try {
+      const startTime = Date.now();
       const res = await fetch(url);
+      const elapsed = Date.now() - startTime;
+      
+      logDebug(`Response received in ${elapsed}ms`, {
+        status: res.status,
+        statusText: res.statusText,
+        ok: res.ok
+      });
+
+      if (!res.ok) {
+        const errorText = await res.text();
+        showError(`HTTP ${res.status}: ${res.statusText}<br>${errorText}`);
+        resultsContainer.innerHTML = "";
+        return;
+      }
+
       const data = await res.json();
+      logDebug("Response data", data);
+      
       renderResults(data, resultsContainer);
     } catch (error) {
-      resultsContainer.innerHTML = `<p>Error: ${error.message}</p>`;
+      showError(`Network error: ${error.message}`);
+      logDebug("Fetch error", error);
+      resultsContainer.innerHTML = "";
     }
   }
 
   // --- Populate Users on Load ---
   async function populateUsers() {
+    const select = document.getElementById('user-select');
+    
     try {
+      logDebug("Fetching users list...");
       const res = await fetch('/users');
+      
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+      }
+      
       const users = await res.json();
-      const select = document.getElementById('user-select');
+      logDebug(`Loaded ${users.length} users`, users);
+
+      select.innerHTML = "";
 
       // Add default "Select User" option
       const defaultOption = document.createElement('option');
       defaultOption.value = '';
-      defaultOption.textContent = 'Kullanıcı Seçin';
+      defaultOption.textContent = '-- Kullanıcı Seçin (Opsiyonel) --';
       select.appendChild(defaultOption);
 
       users.forEach(user => {
         const option = document.createElement('option');
         option.value = user.user_id; 
-        option.textContent = user.name;
+        option.textContent = `${user.name} (ID: ${user.user_id})`;
         select.appendChild(option);
       });
 
       // Auto-select the first real user if available
       if (users.length > 0) {
         select.value = users[0].user_id;
+        showSuccess(`${users.length} kullanıcı yüklendi. İlk kullanıcı otomatik seçildi.`);
       }
     } catch (error) {
-      const select = document.getElementById('user-select');
+      showError(`Failed to load users: ${error.message}`);
       select.innerHTML = `<option value="">Could not load users</option>`;
-      console.error("Failed to populate users:", error);
+      logDebug("Error loading users", error);
     }
   }
 
-  window.onload = populateUsers;
+  // --- Test Endpoints ---
+  async function testEndpoints() {
+    logDebug("Testing endpoints...");
+    
+    try {
+      // Test health
+      const health = await fetch('/health');
+      const healthData = await health.json();
+      logDebug("Health check", healthData);
+      
+      // Test users
+      const users = await fetch('/users');
+      const usersData = await users.json();
+      logDebug("Users endpoint", { count: usersData.length });
+      
+      showSuccess("All endpoints are responding!");
+    } catch (error) {
+      showError(`Endpoint test failed: ${error.message}`);
+    }
+  }
+
+  window.onload = async () => {
+    await populateUsers();
+    // Uncomment to auto-test endpoints on load
+    // await testEndpoints();
+  };
 </script>
 
 </body>
