@@ -75,10 +75,17 @@ def get_candidates(
     WITH r, l, point.distance(point({latitude: l.lat, longitude: l.lng}), point({latitude: $lat, longitude: $lng})) AS dist_meters
     WHERE dist_meters < $radius_meters
     
-    // Determine if this restaurant matches the user's specific intent
-    WITH r, l, dist_meters,
+    // 1. Optional Match for Dishes
+    OPTIONAL MATCH (r)-[:SERVES]->(d:Dish)
+    WITH r, l, dist_meters, collect(d.name) AS dish_names
+
+    // 2. Determine if this restaurant matches the user's specific intent
+    WITH r, l, dist_meters, dish_names,
          reduce(match_found = false, k IN $keywords | 
-            match_found OR toLower(r.name) CONTAINS k OR toLower(r.reviews_text) CONTAINS k
+            match_found 
+            OR toLower(r.name) CONTAINS k 
+            OR toLower(r.reviews_text) CONTAINS k
+            OR any(dn IN dish_names WHERE toLower(dn) CONTAINS k)
          ) AS is_intent_match
 
     OPTIONAL MATCH (r)-[:HAS_CATEGORY]->(c:Category)
@@ -91,6 +98,7 @@ def get_candidates(
         r.price_range   AS price_range,
         r.pagerank      AS pagerank,
         r.reviews_text  AS reviews_text,
+        dish_names,
         l.lat           AS lat,
         l.lng           AS lng,
         dist_meters / 1000.0 AS km,
@@ -127,6 +135,7 @@ def get_candidates(
                 "price_range": row["price_range"],
                 "pagerank": row["pagerank"],
                 "reviews_text": row["reviews_text"],
+                "dishes": row["dish_names"],
                 "km": row["km"],
                 # We can optionally pass 'is_intent_match' if we want to debug, 
                 # but the Python scoring will re-evaluate strict matches anyway.

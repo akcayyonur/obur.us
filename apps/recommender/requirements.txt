@@ -5,6 +5,10 @@ pydantic
 pandas
 openpyxl
 neo4j>=5.14
+python-dotenv
+requests
+beautifulsoup4
+lxml
 
 # test
 pytest

@@ -1,9 +1,53 @@
-node_modules
-dist
-__pycache__
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+.coverage
+.pytest_cache/
+htmlcov/
+
+# --- Node.js ---
+node_modules/
+npm-debug.log
+yarn-error.log
+dist/
+build/
+.next/
+
+# --- Environment Variables & Secrets ---
 .env
-apps/recommender/data/
-debug_lexicon.py
-debug_nlp.py
-inspect_data.py
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# --- IDEs & OS ---
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# --- Project Specific Data & Artifacts ---
+# Ignore large data files but allow keeping the directory structure
+apps/recommender/data/*
+!apps/recommender/data/.gitkeep
+!apps/recommender/data/*.example.xlsx
+!apps/recommender/data/*.example.csv
+
+# Ignore crawled artifacts
 artifacts/
+
+# --- Temporary/Debug Scripts ---
+test_regex.py
+debug_*.py
+inspect_data.py
+check_columns.py
+apps/recommender/check_*.py

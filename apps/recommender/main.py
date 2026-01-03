@@ -2,29 +2,19 @@ from functools import lru_cache
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.exceptions import RequestValidationError
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, FileResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from typing import Set, List, Dict
 import math
 import pandas as pd
 import os
-import json
+from dotenv import load_dotenv
 from nlp_processor import analyze_sentiment, get_sentiment_label
 from graph_candidates import get_candidates
 from neo4j import GraphDatabase
 
-# -------------------------------------------------
-# Custom JSON encoder to handle NaN/Inf
-# -------------------------------------------------
-class SafeJSONResponse(JSONResponse):
-    def render(self, content) -> bytes:
-        return json.dumps(
-            content,
-            ensure_ascii=False,
-            allow_nan=False,  # This will raise an error if NaN/Inf found
-            indent=None,
-            separators=(",", ":"),
-        ).encode("utf-8")
+# Load environment variables from project root
+load_dotenv(os.path.join(os.path.dirname(__file__), '..', '..', '.env'))
 
 # -------------------------------------------------
 # App
@@ -32,8 +22,7 @@ class SafeJSONResponse(JSONResponse):
 
 app = FastAPI(
     title="OBURUS Graph-Based Personalized Recommender",
-    version="3.0",
-    default_response_class=SafeJSONResponse
+    version="3.0"
 )
 
 # Static UI
@@ -47,28 +36,29 @@ app.mount("/ui", StaticFiles(directory="static", html=True), name="static")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 USERS_FILE_PATH = os.path.join(BASE_DIR, "data", "synthetic_users.xlsx")
 
-NEO4J_URI = "bolt://neo4j:7687"
-NEO4J_USER = "neo4j"
-NEO4J_PASS = "oburus_pass"
+NEO4J_URI = os.getenv("NEO4J_URI", "bolt://neo4j:7687")
+NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
+NEO4J_PASS = os.getenv("NEO4J_PASS", "oburus_pass")
+MAPBOX_TOKEN = os.getenv("MAPBOX_TOKEN", "")
 
 neo_driver = GraphDatabase.driver(
     NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASS)
 )
 
 # -------------------------------------------------
-# Exception Handlers
+# Exception Handlers (NEW)
 # -------------------------------------------------
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    return SafeJSONResponse(
+    return JSONResponse(
         status_code=422,
         content={"detail": exc.errors(), "body": exc.body},
     )
 
 @app.exception_handler(StarletteHTTPException)
 async def http_exception_handler(request: Request, exc: StarletteHTTPException):
-    return SafeJSONResponse(
+    return JSONResponse(
         status_code=exc.status_code,
         content={"detail": exc.detail},
     )
@@ -76,7 +66,7 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
 @app.exception_handler(Exception)
 async def generic_exception_handler(request: Request, exc: Exception):
     import traceback
-    return SafeJSONResponse(
+    return JSONResponse(
         status_code=500,
         content={"detail": "Internal Server Error", "error_message": str(exc), "traceback": traceback.format_exc().splitlines()},
     )
@@ -131,47 +121,54 @@ W_POP    = 0.05
 W_CAT    = 0.14
 W_DIST   = 0.10
 W_PRICE  = 0.10
-W_NAME   = 0.20
-W_REVIEW = 0.30
+W_NAME   = 0.15  # New: Score for matching preference in name
+W_REVIEW = 0.25  # Increased from 0.20
+W_MENU   = 0.20  # New: Score for matching preference in menu dishes
 W_COLLAB = 0.10
 W_PAGERANK = 0.18
-W_SENTIMENT = 0.10
+W_SENTIMENT = 0.10 # New: Weight for sentiment score
 
 MAX_KM = 20.0
 
 # -------------------------------------------------
-# Helper functions (Scoring) - WITH NaN/Inf PROTECTION
+# Helper functions (Scoring)
 # -------------------------------------------------
 
 def safe_float(x, default=0.0):
-    """Convert to float and ensure it's JSON-serializable (no NaN/Inf)"""
     if x is None:
         return default
-    try:
-        result = float(x)
-        if math.isnan(result) or math.isinf(result):
-            return default
-        return result
-    except (ValueError, TypeError):
+    if isinstance(x, float) and (math.isnan(x) or math.isinf(x)):
         return default
+    return float(x)
+
+def sanitize_item(item):
+    """Ensure all numeric values in item are JSON-safe"""
+    sanitized = {}
+    for key, value in item.items():
+        if isinstance(value, (int, float)):
+            sanitized[key] = safe_float(value)
+        elif isinstance(value, dict):
+            sanitized[key] = {k: safe_float(v) if isinstance(v, (int, float)) else v
+                            for k, v in value.items()}
+        else:
+            sanitized[key] = value
+    return sanitized
 
 def bayesian_rating(avg, n, C=3.8, m=50):
-    avg = safe_float(avg, C)
-    n = safe_float(n, 0)
-    if n <= 0:
-        return C
+    if avg is None:
+        avg = C
+    if n is None:
+        n = 0
     return (n / (n + m)) * avg + (m / (n + m)) * C
 
 
 def pop_score(n, cap=1000):
-    n = safe_float(n, 0)
-    if n <= 0:
+    if not n or n <= 0:
         return 0.0
     return min(1.0, math.log10(n + 1) / math.log10(cap + 1))
 
 
 def dist_score(km):
-    km = safe_float(km, MAX_KM)
     if km <= 0:
         return 1.0
     if km >= MAX_KM:
@@ -181,9 +178,6 @@ def dist_score(km):
 def price_score(p_item, p_pref):
     if p_pref is None or p_item is None:
         return 0.75
-
-    p_item = safe_float(p_item, 0)
-    p_pref = safe_float(p_pref, 0)
 
     if p_item == p_pref:
         return 1.0
@@ -195,25 +189,9 @@ def price_score(p_item, p_pref):
 
 
 def pagerank_score(pr):
-    pr = safe_float(pr, 0)
-    if pr <= 0:
+    if pr is None or pr <= 0:
         return 0.0
     return min(1.0, math.log10(pr + 1))
-
-
-def sanitize_value(value):
-    """Ensure a value is JSON-serializable"""
-    if value is None:
-        return None
-    if isinstance(value, (int, str, bool)):
-        return value
-    if isinstance(value, float):
-        return safe_float(value, 0.0)
-    if isinstance(value, list):
-        return [sanitize_value(v) for v in value]
-    if isinstance(value, dict):
-        return {k: sanitize_value(v) for k, v in value.items()}
-    return str(value)
 
 
 def score_item(item: dict, base_prefs: Set[str], expanded_prefs: Set[str], raw_prefs: Set[str], price_pref: int | None, collab_score: float, pagerank: float, sentiment_score: float):
@@ -233,14 +211,18 @@ def score_item(item: dict, base_prefs: Set[str], expanded_prefs: Set[str], raw_p
     name_score = 0.0
     item_name_lower = item.get("name", "").lower()
     
+    # Check both MAPPED prefs (e.g. "turkish") and RAW prefs (e.g. "kebap")
+    # This fixes the issue where "kebap" maps to "turkish" and we lose the specificity
     matched_raw_name = {p for p in raw_prefs if p in item_name_lower}
     matched_mapped_name = {p for p in base_prefs if p in item_name_lower}
     
     if matched_raw_name or matched_mapped_name:
         name_score = 1.0
+        # Add name-matched prefs to the response if they weren't found in categories
         for p in (matched_raw_name | matched_mapped_name):
             if p not in matched:
                 matched.append(p)
+    # --- End Name Matching ---
 
     # --- Review Text Matching ---
     review_score = 0.0
@@ -250,29 +232,55 @@ def score_item(item: dict, base_prefs: Set[str], expanded_prefs: Set[str], raw_p
     
     if matched_reviews:
         review_score = 1.0
+        # Add review-matched prefs to matched list for UI feedback
         for p in matched_reviews:
             if p not in matched:
                 matched.append(p)
     
+    # --- End Review Text Matching ---
+
+    # --- Menu (Dish) Matching ---
+    menu_score = 0.0
+    dishes = item.get("dishes", [])
+    # Flatten dishes list to lowercase
+    dishes_lower = [d.lower() for d in dishes if d]
+    
+    # Check if any raw_pref appears in any dish name
+    matched_menu_items = set()
+    for p in raw_prefs:
+        for d in dishes_lower:
+            if p in d:
+                matched_menu_items.add(p)
+                # We found a match for this pref, move to next pref? 
+                # Or keep looking to count? For now, binary score 1.0 if any match.
+                break
+    
+    if matched_menu_items:
+        menu_score = 1.0
+        for p in matched_menu_items:
+            if p not in matched:
+                matched.append(p)
+    # --- End Menu Matching ---
+
     matched.sort()
 
-    # Calculate scores with safe_float
+    # Calculate scores
     base_score = (len(matched_base) / len(base_prefs)) if base_prefs else 0.0
     expanded_score = (len(matched_additional) / len(additional_prefs)) if additional_prefs else 0.0
 
     r = safe_float(bayesian_rating(item.get("rating_avg"), item.get("rating_count")) / 5.0)
     p = safe_float(pop_score(item.get("rating_count")))
-    c = safe_float(0.8 * base_score + 0.2 * expanded_score)
+    c = safe_float(0.8 * base_score + 0.2 * expanded_score) # Weighted category score
     d = safe_float(dist_score(item.get("km", MAX_KM)))
-    pr_score = safe_float(price_score(item.get("price_range"), price_pref))
+    pr_score = safe_float(price_score(item.get("price_range"), price_pref)) # Renamed to avoid conflict
     n_score = safe_float(name_score)
     rv_score = safe_float(review_score)
+    m_score = safe_float(menu_score)
     cs = safe_float(collab_score)
     prs = safe_float(pagerank_score(pagerank))
     
     # Normalize sentiment_score from -1 to 1 range to 0 to 1 range for weighting
-    sentiment_score = safe_float(sentiment_score, 0.0)
-    normalized_sentiment = safe_float((sentiment_score + 1.0) / 2.0)
+    normalized_sentiment = (sentiment_score + 1.0) / 2.0 
     
     score = safe_float(
         W_RATING * r +
@@ -282,25 +290,27 @@ def score_item(item: dict, base_prefs: Set[str], expanded_prefs: Set[str], raw_p
         W_PRICE  * pr_score + 
         W_NAME   * n_score +
         W_REVIEW * rv_score +
+        W_MENU   * m_score +
         W_COLLAB * cs +
         W_PAGERANK * prs +
         W_SENTIMENT * normalized_sentiment
     )
 
     score_breakdown = {
-        "weighted_rating": safe_float(W_RATING * r, 0.0),
-        "weighted_popularity": safe_float(W_POP * p, 0.0),
-        "weighted_category": safe_float(W_CAT * c, 0.0),
-        "weighted_distance": safe_float(W_DIST * d, 0.0),
-        "weighted_price": safe_float(W_PRICE * pr_score, 0.0),
-        "weighted_name_match": safe_float(W_NAME * n_score, 0.0),
-        "weighted_review_match": safe_float(W_REVIEW * rv_score, 0.0),
-        "weighted_collaborative": safe_float(W_COLLAB * cs, 0.0),
-        "weighted_pagerank": safe_float(W_PAGERANK * prs, 0.0),
-        "weighted_sentiment": safe_float(W_SENTIMENT * normalized_sentiment, 0.0),
+        "weighted_rating": round(W_RATING * r, 6),
+        "weighted_popularity": round(W_POP * p, 6),
+        "weighted_category": round(W_CAT * c, 6),
+        "weighted_distance": round(W_DIST * d, 6),
+        "weighted_price": round(W_PRICE * pr_score, 6),
+        "weighted_name_match": round(W_NAME * n_score, 6),
+        "weighted_review_match": round(W_REVIEW * rv_score, 6),
+        "weighted_menu_match": round(W_MENU * m_score, 6),
+        "weighted_collaborative": round(W_COLLAB * cs, 6),
+        "weighted_pagerank": round(W_PAGERANK * prs, 6),
+        "weighted_sentiment": round(W_SENTIMENT * normalized_sentiment, 6),
     }
 
-    return score, matched, sentiment_score, score_breakdown
+    return round(score, 6), matched, sentiment_score, score_breakdown
 
 
 # -------------------------------------------------
@@ -387,25 +397,60 @@ def get_user_preferences(user_id: int) -> Set[str]:
 # API Endpoints
 # -------------------------------------------------
 
+@app.get("/")
+def read_root():
+    """
+    Serve the main UI page
+    """
+    return FileResponse("static/index.html")
+
+@app.get("/logo.png")
+def get_logo():
+    """
+    Serve the logo file
+    """
+    return FileResponse("static/logo.png")
+
 @app.get("/health")
 def health():
     return {"ok": True, "algo": "graph_hybrid_v3"}
 
 
+@app.get("/config")
+def get_config():
+    """
+    Returns client-side configuration including Mapbox token.
+    """
+    return {"mapbox_token": MAPBOX_TOKEN}
+
+
+@app.post("/rank")
+def rank_post(request: dict):
+    """
+    POST version of /rank endpoint for compatibility with API service.
+    Simply returns the top candidates without complex scoring.
+    """
+    candidates = request.get("candidates", [])
+    # Sort by rating_avg and return
+    sorted_candidates = sorted(candidates, key=lambda x: x.get("rating_avg", 0), reverse=True)
+    return {
+        "algo": "simple_rating_sort",
+        "items": sorted_candidates
+    }
+
+
 @app.get("/users")
 def get_users():
     """
-    Reads users from the data/synthetic_users.xlsx file and returns them as a list.
+    Reads users from the data/users.xlsx file and returns them as a list.
     This is used to populate the user selection dropdown in the UI.
     """
     try:
         df_users = pd.read_excel(USERS_FILE_PATH)
-        # Remove duplicates based on user_id
-        df_users = df_users.drop_duplicates(subset=['user_id'], keep='first')
         users = df_users.to_dict(orient="records")
         return users
     except FileNotFoundError:
-        return {"error": "synthetic_users.xlsx not found"}
+        return {"error": "users.xlsx not found"}
     except Exception as e:
         print(f"An error occurred: {e}")
         return {"error": str(e)}
@@ -415,21 +460,26 @@ def get_users():
 def rank(
     lat: float,
     lng: float,
-    prefs: str = "",
+    prefs: str,
     radius_km: float = 5.0,
-    topK: int = 10,
     seed_restaurant_id: int | None = None,
     price_range: int | None = None
 ):
-    # Parse and map preferences
+    # -----------------------------
+    # 1. Parse and map preferences
+    # -----------------------------
     raw_prefs = {p.strip().lower() for p in prefs.split(",") if p.strip()}
     base_prefs = {FOOD_TO_CATEGORY.get(p, p) for p in raw_prefs}
 
-    # Category co-occurrence expansion
+    # -----------------------------
+    # 2. Category co-occurrence expansion
+    # -----------------------------
     co_map = get_category_cooccurrence()
     expanded_prefs = expand_categories(base_prefs, co_map)
 
-    # Get location-based candidates
+    # -----------------------------
+    # 3. Get location-based candidates and pre-filter
+    # -----------------------------
     all_candidates = get_candidates(
         lat=lat,
         lng=lng,
@@ -437,62 +487,95 @@ def rank(
         raw_prefs=list(raw_prefs)
     )
 
-    # Pre-filter candidates if prefs provided
     candidates = []
-    if base_prefs:
+    if raw_prefs:
         for c in all_candidates:
-            tokens = {t.strip().lower() for t in c.get("categories", "").split(",") if t}
-            if tokens & base_prefs:
+            # Strict filtering: Match must be in NAME, REVIEWS, or DISHES
+            # We use raw_prefs (e.g. "kebap") not base_prefs (e.g. "turkish")
+            name_lower = c.get("name", "").lower()
+            reviews_lower = c.get("reviews_text", "").lower() if c.get("reviews_text") else ""
+            dishes_lower = [d.lower() for d in c.get("dishes", [])]
+            
+            # Check if ANY raw pref is in name or reviews or dishes
+            match_found = False
+            for p in raw_prefs:
+                if p in name_lower or p in reviews_lower:
+                    match_found = True
+                    break
+                # Check dishes
+                for d in dishes_lower:
+                    if p in d:
+                        match_found = True
+                        break
+                if match_found: break
+            
+            if match_found:
                 candidates.append(c)
     else:
+        # If no prefs, use all candidates
         candidates = all_candidates
 
-    # Graph similarity filtering (optional)
+
+    # -----------------------------
+    # 4. Graph similarity filtering (optional)
+    # -----------------------------
     similar_ids = set()
     if seed_restaurant_id is not None:
         similar_ids = get_similar_restaurant_ids(seed_restaurant_id)
 
-    # Scoring
+    # -----------------------------
+    # 5. Scoring
+    # -----------------------------
     items = []
     for c in candidates:
         if similar_ids and c["id"] not in similar_ids:
             continue
 
+        # --- Analyze sentiment from reviews ---
         sentiment_score = analyze_sentiment(c.get("reviews_text", ""))
         sentiment_label = get_sentiment_label(sentiment_score)
+        # --- End sentiment analysis ---
 
         score, matched, _, score_breakdown = score_item(
             c,
             base_prefs,
             expanded_prefs,
             raw_prefs,
-            None,
-            0.0,
+            None, # price_pref
+            0.0, # collab
             c.get("pagerank", 0.0),
             sentiment_score
         )
 
         items.append({
-            "id": sanitize_value(c["id"]),
-            "name": sanitize_value(c["name"]),
-            "lat": safe_float(c.get("lat"), 0.0),
-            "lng": safe_float(c.get("lng"), 0.0),
-            "km": safe_float(c.get("km", 0.0)),
-            "categories": sanitize_value(c.get("categories")),
-            "rating_avg": safe_float(c.get("rating_avg")),
-            "rating_count": safe_float(c.get("rating_count"), 0),
-            "price_range": safe_float(c.get("price_range"), 0),
-            "pagerank": safe_float(c.get("pagerank"), 0.0),
+            "id": c["id"],
+            "name": c["name"],
+            "lat": c["lat"],
+            "lng": c["lng"],
+            "km": safe_float(round(c.get("km", 0.0), 3)),
+            "categories": c["categories"],
+            "rating_avg": c["rating_avg"],
+            "rating_count": c["rating_count"],
+            "price_range": c["price_range"],
+            "pagerank": c["pagerank"],
             "matched_categories": matched,
-            "sentiment_score": safe_float(sentiment_score, 0.0),
-            "sentiment_label": sentiment_label,
-            "score": safe_float(score, 0.0),
+            "sentiment_score": sentiment_score, # Add sentiment score to response
+            "sentiment_label": sentiment_label, # Add sentiment label to response
+            "reviews_text": c.get("reviews_text", ""), # Add reviews text to response
+            "dishes": c.get("dishes", []), # Add dishes to response
+            "score": score,
             "score_breakdown": score_breakdown
         })
 
     items.sort(key=lambda x: x["score"], reverse=True)
-    items = items[:topK]
+    # Return all results within radius, no limit
 
+    # Sanitize all items for JSON safety
+    items = [sanitize_item(item) for item in items]
+
+    # -----------------------------
+    # 6. Response
+    # -----------------------------
     return {
         "algo": "graph_hybrid_v3_similarity_enriched",
         "input_prefs": list(base_prefs),
@@ -509,29 +592,38 @@ def user_recommendations(
     lat: float,
     lng: float,
     radius_km: float = 5.0,
-    topK: int = 10,
     price_range: int | None = None,
     prefs: str | None = None
 ):
-    # Get user's historical preferences for SCORING
+    # -----------------------------
+    # 1. Get user's historical preferences for SCORING
+    # -----------------------------
     base_prefs = get_user_preferences(user_id)
 
-    # Parse query preferences for FILTERING
+    # -----------------------------
+    # 2. Parse query preferences for FILTERING
+    # -----------------------------
     query_prefs = set()
     raw_prefs_set = set()
     if prefs:
         raw_prefs_set = {p.strip().lower() for p in prefs.split(",") if p.strip()}
         query_prefs = {FOOD_TO_CATEGORY.get(p, p) for p in raw_prefs_set}
 
-    # Category co-occurrence expansion (for scoring)
+    # -----------------------------
+    # 3. Category co-occurrence expansion (for scoring)
+    # -----------------------------
     co_map = get_category_cooccurrence()
     expanded_prefs = expand_categories(base_prefs, co_map)
 
-    # Collaborative filtering
+    # -----------------------------
+    # 4. Collaborative filtering
+    # -----------------------------
     similar_users = get_similar_users(user_id)
     collab_recs = get_user_recommendations(similar_users)
 
-    # Get location-based candidates
+    # -----------------------------
+    # 5. Get location-based candidates
+    # -----------------------------
     all_candidates = get_candidates(
         lat=lat,
         lng=lng,
@@ -539,24 +631,45 @@ def user_recommendations(
         raw_prefs=list(raw_prefs_set)
     )
 
-    # Filter candidates by query_prefs if provided, otherwise use all
+    # -----------------------------
+    # 6. Filter candidates by query_prefs if provided
+    # -----------------------------
     candidates = []
-    if query_prefs:
+    if raw_prefs_set:
         for c in all_candidates:
-            tokens = {t.strip().lower() for t in c.get("categories", "").split(",") if t}
-            if tokens & query_prefs:
+            # Strict filtering for user_recommendations as well
+            name_lower = c.get("name", "").lower()
+            reviews_lower = c.get("reviews_text", "").lower() if c.get("reviews_text") else ""
+            dishes_lower = [d.lower() for d in c.get("dishes", [])]
+            
+            match_found = False
+            for p in raw_prefs_set:
+                if p in name_lower or p in reviews_lower:
+                    match_found = True
+                    break
+                # Check dishes
+                for d in dishes_lower:
+                    if p in d:
+                        match_found = True
+                        break
+                if match_found: break
+            
+            if match_found:
                 candidates.append(c)
     else:
-        # If no query prefs, use all candidates and rank by user's historical preferences
         candidates = all_candidates
 
-    # Scoring
+    # -----------------------------
+    # 7. Scoring
+    # -----------------------------
     items = []
     for c in candidates:
         collab_score = collab_recs.get(c["id"], 0.0)
         
+        # --- Analyze sentiment from reviews ---
         sentiment_score = analyze_sentiment(c.get("reviews_text", ""))
         sentiment_label = get_sentiment_label(sentiment_score)
+        # --- End sentiment analysis ---
 
         score, matched, _, score_breakdown = score_item(
             c,
@@ -566,30 +679,38 @@ def user_recommendations(
             price_range,
             collab_score,
             c.get("pagerank", 0.0),
-            sentiment_score
+            sentiment_score # Pass sentiment score to score_item
         )
 
         items.append({
-            "id": sanitize_value(c["id"]),
-            "name": sanitize_value(c["name"]),
-            "lat": safe_float(c.get("lat"), 0.0),
-            "lng": safe_float(c.get("lng"), 0.0),
-            "km": safe_float(c.get("km", 0.0)),
-            "categories": sanitize_value(c.get("categories")),
-            "rating_avg": safe_float(c.get("rating_avg")),
-            "rating_count": safe_float(c.get("rating_count"), 0),
-            "price_range": safe_float(c.get("price_range"), 0),
-            "pagerank": safe_float(c.get("pagerank"), 0.0),
+            "id": c["id"],
+            "name": c["name"],
+            "lat": c["lat"],
+            "lng": c["lng"],
+            "km": safe_float(round(c.get("km", 0.0), 3)),
+            "categories": c["categories"],
+            "rating_avg": c["rating_avg"],
+            "rating_count": c["rating_count"],
+            "price_range": c["price_range"],
+            "pagerank": c["pagerank"],
             "matched_categories": matched,
-            "sentiment_score": safe_float(sentiment_score, 0.0),
-            "sentiment_label": sentiment_label,
-            "score": safe_float(score, 0.0),
+            "sentiment_score": sentiment_score, # Add sentiment score to response
+            "sentiment_label": sentiment_label, # Add sentiment label to response
+            "reviews_text": c.get("reviews_text", ""), # Add reviews text to response
+            "dishes": c.get("dishes", []), # Add dishes to response
+            "score": score,
             "score_breakdown": score_breakdown
         })
 
     items.sort(key=lambda x: x["score"], reverse=True)
-    items = items[:topK]
+    # Return all results within radius, no limit
 
+    # Sanitize all items for JSON safety
+    items = [sanitize_item(item) for item in items]
+
+    # -----------------------------
+    # 8. Response
+    # -----------------------------
     return {
         "algo": "graph_hybrid_v6_personalized_filtered",
         "user_historical_prefs": list(base_prefs),

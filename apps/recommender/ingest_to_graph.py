@@ -5,16 +5,19 @@ from neo4j import GraphDatabase
 # -------------------------------------------------
 # Neo4j connection
 # -------------------------------------------------
-NEO4J_URI  = os.getenv("NEO4J_URI", "bolt://neo4j:7687")
+NEO4J_URI  = os.getenv("NEO4J_URI", "bolt://localhost:7687")
 NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
 NEO4J_PASS = os.getenv("NEO4J_PASS", "oburus_pass")
 
 driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASS))
 
-XLSX_RESTAURANTS_PATH = "/app/data/restaurants.xlsx"
-# Using synthetic data for better graph recommendations
-XLSX_USERS_PATH = "/app/data/synthetic_users.xlsx"
-XLSX_VISITS_PATH = "/app/data/synthetic_visits.xlsx"
+# Define paths dynamically
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "data")
+
+XLSX_RESTAURANTS_PATH = os.getenv("XLSX_RESTAURANTS_PATH", os.path.join(DATA_DIR, "restaurants.xlsx"))
+XLSX_USERS_PATH = os.getenv("XLSX_USERS_PATH", os.path.join(DATA_DIR, "synthetic_users.xlsx"))
+XLSX_VISITS_PATH = os.getenv("XLSX_VISITS_PATH", os.path.join(DATA_DIR, "synthetic_visits.xlsx"))
 
 # -------------------------------------------------
 # TripAdvisor cuisine → OBURUS category ontology
@@ -66,7 +69,8 @@ def ingest_restaurants(tx, payload):
             r.rating_count = $rating_count,
             r.price_range = $price_range,
             r.source = 'tripadvisor',
-            r.reviews_text = $reviews_text
+            r.reviews_text = $reviews_text,
+            r.website = $website
         WITH r
         MERGE (l:Location {lat: $lat, lng: $lng})
         MERGE (r)-[:LOCATED_AT]->(l)
@@ -176,8 +180,17 @@ def main():
         df_restaurants.restaurant_id.values, index=df_restaurants.name
     ).to_dict()
 
+    social_domains = ["instagram.com", "facebook.com", "twitter.com", "tripadvisor", "yelp.com", "foursquare.com", "tripadvisor.com.tr", "tripadvisor.com"]
+
     with driver.session() as session:
         for _, row in df_restaurants.iterrows():
+            raw_website = str(row.get("website", "")).strip()
+            website = None
+            if raw_website and raw_website.lower() != "nan" and raw_website.lower() != "none":
+                is_social = any(domain in raw_website.lower() for domain in social_domains)
+                if not is_social:
+                    website = raw_website
+
             payload = {
                 "id": int(row["restaurant_id"]),
                 "name": str(row["name"]),
@@ -186,6 +199,7 @@ def main():
                 "rating_avg": row.get("tripadvisor_rating"),
                 "rating_count": int(row.get("tripadvisor_review_count", 0) or 0),
                 "price_range": int(row.get("price_range", 0) or 0),
+                "website": website,
                 "categories": map_cuisines_to_categories(
                     parse_cuisines(row.get("tripadvisor_cuisine"))
                 ),
